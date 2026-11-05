@@ -1,4 +1,4 @@
-# -olist-demand-forecasting-fulfillment-reliability
+# olist-demand-forecasting-fulfillment-reliability
 
 ## Data Structure & Initial Checks
 
