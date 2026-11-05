@@ -2,7 +2,7 @@
 
 ## Data Structure & Initial Checks
 
-The original dataset contains **nine tables** and about **1.55 million records** from Olist, a Brazilian online marketplace, covering orders placed between **September 2016 and October 2018**. Each order is a purchase made by one customer from one or more independent sellers. The analysis starts with the nine raw tables, rebuilds them in Power Query into one flat order-item table for analysis, and uses a few small summary tables for forecasting, delivery reliability, and customer experience.
+The original dataset contains **nine tables** and about **1.55 million records** (1,554,239 rows) from Olist, a Brazilian online marketplace, covering orders placed between **September 2016 and October 2018**. Each order is a purchase made by one customer from one or more independent sellers. The analysis starts with the nine raw tables, rebuilds them in Power Query into one flat order-item table for analysis, and uses a few small summary tables for forecasting, delivery reliability, and customer experience.
 
 The dataset does **not** include inventory levels, supplier lead times, or product costs. Because of this, the project measures *delivery* reliability (seller to customer) and uses item revenue as a profit proxy. It does not measure procurement lead time or true safety stock.
 
@@ -17,27 +17,31 @@ The dataset does **not** include inventory levels, supplier lead times, or produ
 | `olist_orders_dataset` | One order | 99,441 | `order_id`, `customer_id`, `order_status`, purchase, approval, carrier, delivery, and estimated delivery timestamps |
 | `olist_order_items_dataset` | One item within an order | 112,650 | `order_id`, `order_item_id`, `product_id`, `seller_id`, `price`, `freight_value` |
 | `olist_order_payments_dataset` | One payment record for an order | 103,886 | `order_id`, `payment_type`, `payment_installments`, `payment_value` |
-| `olist_order_reviews_dataset` | One review record | 99,224 | `review_id`, `order_id`, `review_score`, `review_comment_title`, `review_comment_message` |
+| `olist_order_reviews_dataset` | One review record | 102,541* | `review_id`, `order_id`, `review_score`, `review_comment_title`, `review_comment_message` |
 | `olist_products_dataset` | One product | 32,951 | `product_id`, `product_category_name`, `product_weight_g` |
 | `olist_customers_dataset` | One customer ID (a new ID per order) | 99,441 | `customer_id`, `customer_unique_id`, zip prefix, city, state |
 | `olist_sellers_dataset` | One seller | 3,095 | `seller_id`, zip prefix, city, state |
 | `olist_geolocation_dataset` | One coordinate point for a zip prefix | 1,000,163 | zip prefix, latitude, longitude, city, state |
 | `product_category_name_translation` | One Portuguese category name | 71 | Portuguese name, English name |
 
+\*The reviews file contains 3,317 exact duplicate rows. After removing them, 99,224 rows remain, which matches the published row count.
+
 The `orders` table is the hub. It connects to customers through `customer_id`, to items, payments, and reviews through `order_id`, and items connect to products and sellers. Zip prefixes in the customers, sellers, and geolocation tables connect locations to coordinates.
 
 ### Order Status
 
-| Status | Meaning | Treatment |
-|---|---|---|
-| `delivered` | Order reached the customer | Counted as demand. The only status eligible for delivery analysis |
-| `shipped` | Order is with the carrier | Counted as demand |
-| `invoiced` | Order invoiced, not yet shipped | Counted as demand |
-| `processing` | Order is being prepared (301 orders) | Counted as demand |
-| `approved` | Payment approved (2 orders) | Counted as demand |
-| `created` | Order created, not yet approved | Counted as demand |
-| `canceled` | Order canceled | Excluded from demand |
-| `unavailable` | Items unavailable | Excluded from demand |
+| Status | Orders | Meaning | Treatment |
+|---|---|---|---|
+| `delivered` | 96,478 | Order reached the customer | Counted as demand. The only status eligible for delivery analysis |
+| `shipped` | 1,107 | Order is with the carrier | Counted as demand |
+| `canceled` | 625 | Order canceled | Excluded from demand |
+| `unavailable` | 609 | Items unavailable | Excluded from demand |
+| `invoiced` | 314 | Order invoiced, not yet shipped | Counted as demand |
+| `processing` | 301 | Order is being prepared | Counted as demand |
+| `created` | 5 | Order created, not yet approved | Counted as demand, but none of these orders have items, so they do not appear in the item-level analysis |
+| `approved` | 2 | Payment approved | Counted as demand |
+
+Of the 99,441 orders, **775 have no order items** (603 `unavailable`, 164 `canceled`, 5 `created`, 2 `invoiced`, and 1 `shipped`). They cannot contribute demand or revenue, so they are not in the flat table, which leaves **98,666 orders** with at least one item.
 
 ### Analysis Tables
 
@@ -63,26 +67,38 @@ The SQL checks used to profile the raw data and to validate the cleaned table ar
 Several profiling checks were completed in SQL before cleaning and modeling the data.
 
 **Row counts and import validation:**  
-Row counts were compared with the published counts for each file to confirm the import was complete. Review comments contain line breaks, which are a common cause of broken imports, so the reviews table was checked first. Zip code prefixes were imported as text, because reading them as numbers drops leading zeros and breaks joins between tables.
+Row counts were compared with the published counts for each file to confirm the import was complete. Every file matched except the reviews file, which has 102,541 rows because it contains 3,317 exact duplicate rows; removing them gives exactly the published 99,224. Zip code prefixes were imported as text, because reading them as numbers drops leading zeros and breaks joins between tables.
 
 **Date range check:**  
 Orders span **September 2016 to October 2018**. The earliest months of 2016 and the last months of 2018 contain very few orders, so the demand analysis uses **January 2017 to August 2018**, which gives 20 complete months.
 
 **Order status check:**  
-Most orders are `delivered`. Orders with `canceled` or `unavailable` status are excluded from demand analysis. The `processing` (301) and `approved` (2) orders are kept because they are real purchases that had not shipped yet.
+**97.02%** of orders are `delivered`. Orders with `canceled` or `unavailable` status are excluded from demand analysis. The `processing` (301) and `approved` (2) orders are kept because they are real purchases that had not shipped yet.
 
 **Delivery timestamp validation:**  
-Only `delivered` orders can have a customer delivery date. Among delivered orders with complete timestamps, delivery time from purchase to customer averaged **12.56 days**, with a median of **10.22 days**, a 95th percentile of **29.27 days**, and a maximum of **209.63 days**. Because the mean is higher than the median and the tail is long, delivery times are **right-skewed**. This is why the delivery buffer uses an empirical percentile rather than a mean plus standard deviations. Orders with missing timestamps, or with a carrier or delivery date earlier than the purchase date, are flagged and excluded from delivery analysis but kept for demand analysis. **[X – check 1.11]** orders had timestamp anomalies.
+Only `delivered` orders can have a customer delivery date. Timestamp order was tested for six rules. No order was approved before purchase, delivered before purchase, or had an estimated delivery date before purchase. Three problems were found:
+
+| Issue | Orders |
+|---|---|
+| Carrier date before purchase | 166 |
+| Delivered before carrier date | 23 |
+| Carrier date before approval | 1,359 |
+
+Orders where the carrier date is before purchase or delivery is before the carrier date, along with orders missing a delivery or carrier date, are excluded from delivery analysis but kept for demand analysis. The 1,359 orders where the carrier date is before the approval timestamp are **not** excluded, because the approval timestamp is not used in any delivery measure and these orders keep a valid purchase, carrier, and delivery sequence.
+
+Of the **96,478 delivered orders**, **96,281** passed all delivery rules (197 were excluded). Of those, **95,029** come from a single seller and **1,252** involve more than one seller. Delivery reliability statistics use only the 95,029 single-seller orders, because a multi-seller order has one delivery time but several sellers. **6,531** of the 96,281 eligible orders were delivered after the estimated delivery date, judged by date rather than timestamp.
+
+In the Phase 0 profile of delivered orders with a delivery date (**96,470 orders**), delivery time from purchase to customer averaged **12.56 days**, with a median of **10.22 days**, a 95th percentile of **29.27 days**, and a maximum of **209.63 days**. Because the mean is higher than the median and the tail is long, delivery times are **right-skewed**. This is why the delivery buffer uses an empirical percentile rather than a mean plus standard deviations.
 
 **Missing values:**  
 Missing values were found in the order timestamps, review comments, and product category.
 
 - Review comment titles are missing for about **88%** of reviews and comment messages for about **58–59%**. A missing comment mostly means the customer left a star rating without text, not that no review exists.
-- Missing `product_category_name` values were labeled `unknown`. In the demand window these items account for **1,449 orders** and about **1.33%** of revenue.
+- Missing `product_category_name` values were labeled `unknown`. In the demand window these items account for **1,449 orders** and about **1.33%** of revenue (before removing canceled and unavailable orders).
 - Blank text values were standardized as nulls before cleaning.
 
-**Review duplicate checks:**  
-There were **[X – check 4.2]** exact duplicate review rows, and all duplicate groups were identical. These were collapsed to one row. **[X – check 4.5]** orders had more than one review, and the most recent answer was kept.
+**Review duplicate and coverage checks:**  
+There were **3,317 duplicate review groups** (6,634 rows), and every group was fully identical, so one row per group was kept and **3,317 rows were removed**. The remaining **99,224 review rows** cover **98,673 orders**, so a small number of orders (551 more review rows than orders) have more than one distinct review. For these orders the most recent answer was kept. Another **768 orders have no review record at all** and form the "no review" group used in the customer experience analysis.
 
 A further **789 `review_id` values** were shared by more than one order. In every case the orders belonged to the same customer, and 748 of them were placed within an hour of each other. These look like one review copied across several orders, so they were treated as errors: they are excluded from review metrics, but the orders are kept and labeled `invalid_shared_id` so they are not mistaken for orders with no review.
 
@@ -93,18 +109,24 @@ Products fall into **73 product categories**, and the translation file covers **
 Categories were tested on three criteria over the 20-month window: active in every month, at least 30 orders per month on average, and within the first 80% of cumulative revenue (revenue is used as a profit proxy because item price is the only value available and freight is excluded). **17 categories** met all three and cover about **79.6%** of window revenue, so they are the categories forecast in this project. Two points are worth noting:
 
 - `computers` ranks 17th by revenue but exists in only **13 of the 20 months**, so it was reported but not forecast.
-- `pet_shop` sits just under the 80% revenue line (about 79.7% cumulative before it) and is kept because it was active in all 20 months with about 85 orders per month.
+- `pet_shop` sits just under the 80% revenue line and is kept because it was active in all 20 months with about 85 orders per month.
 
 The list is frozen on purpose so forecasts do not change category lists when data is refreshed.
 
 **Location and geolocation checks:**  
-The geolocation table has about **1 million rows** but only one location is needed per zip prefix. **[X – check 8.2]** exact duplicate rows were removed, and **[X – check 8.3]** points outside Brazil were removed as bad coordinates. The coordinate limits were widened to keep Fernando de Noronha (zip prefix 53990), which lies far east of the mainland. The remaining points were reduced to one row per zip prefix using median latitude and longitude. **[X – checks 8.7/8.8]** customer and seller zip prefixes had no usable coordinates, and these were left blank rather than estimated.
+The geolocation table has **1,000,163 rows** but only one location is needed per zip prefix. There were **128,174 groups of exact duplicate rows**, and **261,831 duplicate rows were removed**, leaving 738,332 rows. In the profiling check, **31 points across 20 zip prefixes** fell outside Brazil's mainland bounding box. The coordinate limits used in the pipeline were widened to keep Fernando de Noronha (zip prefix 53990), which lies far east of the mainland. The remaining points were reduced to one row per zip prefix using median latitude and longitude, producing a lookup of **19,011 zip prefixes** out of 19,015 in the raw table (4 prefixes lost all their points as out-of-Brazil coordinates).
+
+In the raw data, **278 customer rows (0.28%, 157 distinct zip prefixes)** and **7 seller rows (0.23%)** had no matching geolocation record. Where coordinates are missing they are left blank rather than estimated, and the state is kept.
 
 **Price, freight, and payment checks:**  
-Zero freight values were kept because free shipping is real. Zero-value payments were kept because they can represent vouchers, while payment records with zero installments were treated as missing installment information. **[X – checks 2.3/2.10/3.3]** records were affected.
+No order item has a missing product, seller, shipping limit date, price, or freight value. There are no zero or negative prices and no negative freight values. **383 items have zero freight**, which was kept because free shipping is real.
+
+Freight is a meaningful share of item price: for **38.4%** of items freight is 10–24% of the price and for **29.2%** it is 25–49%. For **4,124 items (3.7%)** freight is equal to or above the item price (3,593 items at 100–199% and 531 at 200% or more). These were kept because they can be real low-price items with high shipping cost, and they matter for the customer experience analysis.
+
+In payments, there are **9 zero-value records** and **3 records with an undefined payment type** (`not_defined`), all kept as-is. There are **2 records with zero installments**, which were treated as missing installment information.
 
 **Join integrity:**  
-**[X – section 10 orphan checks]**. Orders without any items were not carried into the flat table, because there is nothing to count as demand.
+There are **no orphan records**: every item, payment, and review points to an existing order, every item points to an existing product and seller, and every order points to an existing customer. Every customer has at least one order. Some orders are missing child records: 775 orders have no items (see order status), 1 order has no payment record, and 768 orders have no review record.
 
 ### Data Cleaning
 
@@ -123,4 +145,6 @@ The cleaned dataset was built in Power Query from the raw files with the followi
 - Added freight-to-price ratio, seller-to-customer lane, same-state flag, and straight-line distance.
 - Marked the first row of each order (`is_order_first_row`) so order-level metrics are not counted once per item.
 
-The result is a refreshable table with **112,650 rows**, one for each order item.
+The result is a refreshable table with **112,650 rows**, one for each order item, covering **98,666 orders**. Of these orders, **96,281** are eligible for delivery analysis and **95,029** of those come from a single seller.
+
+The cleaned table was validated by rebuilding the same rules independently in SQL. Row counts, the demand, forecast-window, and delivery flags, review status, category, geolocation, and delivery-time statistics all matched between Power Query and SQL.
