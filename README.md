@@ -148,3 +148,91 @@ The cleaned dataset was built in Power Query from the raw files with the followi
 The result is a refreshable table with **112,650 rows**, one for each order item, covering **98,666 orders**. Of these orders, **96,281** are eligible for delivery analysis and **95,029** of those come from a single seller.
 
 The cleaned table was validated by rebuilding the same rules independently in SQL. Row counts, the demand, forecast-window, and delivery flags, review status, category, geolocation, and delivery-time statistics all matched between Power Query and SQL.
+
+### Category A: Demand & Category Performance
+
+**Supporting materials:**
+- Excel workbook: [olist_pipeline_v3.xlsx](olist_pipeline_v3.xlsx)
+  - `fc_accuracy`: backtest accuracy by series and model
+  - `fc_drivers`: correlation tests and error breakdown by series
+  - `fc_viewer`: actual vs backtest vs forecast chart for any series
+
+This section answers:
+
+**Which product categories and regions have the most volatile or hardest-to-predict demand, and why?**
+
+Weekly item demand was forecast for the 17 Tier 1 categories and Brazil's 5 regions. Three methods were tested: a 4-week moving average (MA4) as the baseline, simple exponential smoothing (SES), and Excel's FORECAST.ETS. Each method was fitted on 74 weeks (January 2017 to May 2018) and scored on the 11 held-out weeks that followed (4 June to 19 August 2018). Accuracy is measured with MAPE (average weekly % error), bias (total over- or under-forecast) and RMSE (typical miss in items per week).
+
+<p align="center">
+  <img src="images/forecast_volume_vs_error.png" width="700"><br>
+</p>
+
+#### Insight 1: Simple exponential smoothing was the most reliable method, and FORECAST.ETS did not beat the baseline.
+
+| Measure | FORECAST.ETS | SES | MA4 |
+|---|---|---|---|
+| Median MAPE, 17 categories | 33.3% | **29.8%** | 32.0% |
+| Median MAPE, 5 regions | 33.0% | **18.8%** | 22.1% |
+| Series where the method is best (of 24) | 4 | **17** | 3 |
+| Median bias, 17 categories | +14.8% | **+7.7%** | +14.3% |
+
+- SES had the lowest error for both categories and regions, the smallest bias, and was the best method for **17 of 24 series**.
+- FORECAST.ETS did worse because it projects a trend. It learned the fast growth of 2017 and kept projecting it forward, but by mid-2018 demand had stopped growing and then dipped after the truckers' strike.
+- That left FORECAST.ETS consistently too high, with a median over-forecast of **14.8%**, about twice that of SES.
+- With only 1.4 years of history and no repeated seasonal pattern to learn from, a method that tracks the current level is safer than one that assumes past growth will continue.
+
+#### Insight 2: Regions forecast better than categories, but Southeast and North were harder to predict for different reasons.
+
+- Three of five regions had MAPE under **20%** ("good" on the Lewis scale): **Northeast (15.5%)**, **South (17.3%)** and **Center-West (18.8%)**. Only one category, **health_beauty (14.6%)**, reached that level.
+- Regions forecast better because each one combines many categories, so the ups and downs of individual categories partly cancel out.
+
+**Southeast (24.9% MAPE): large, but hit by a sharp temporary drop**
+- Southeast is the largest region, with **69%** of all demand. Normally, a series this large should be among the easiest to forecast, because random week-to-week noise is small relative to its size.
+- Its error came instead from one sharp swing. In the week of 9 July, Southeast demand fell to about **half** its normal pre-strike level, a much deeper drop than any other region.
+- Two weeks later it had fully recovered. A forecasting model cannot anticipate a sudden one-week collapse and rebound like this, so the forecast was far too high during the drop.
+- The drop was concentrated in São Paulo, Rio de Janeiro and Minas Gerais, the region's three largest states. Because Southeast is most of the business, this swing also drove the national total.
+
+**North (30.6% MAPE): small, and moving against the other regions**
+- North is the smallest region, at about **31 items a week**. At that size, a handful of orders more or less swings the weekly total by a large percentage, which pushes MAPE up.
+- North also behaved differently from the rest of the country. It recovered quickly after the strike, barely dipped in July, and then had a short spike in late July before dropping off.
+- The models expected North to follow its own past level. It ended up as the only region they under-forecast (bias **-7%**), because its demand returned to normal while the other regions stayed lower after the strike.
+
+#### Insight 3: Volume is the strongest predictor of forecast accuracy.
+
+- Higher-volume series were consistently easier to forecast. Across the 17 categories, the rank correlation between weekly volume and MAPE is **-0.70** (p = **0.002**), so the pattern is very unlikely to be chance.
+- The pattern holds when regions are included (**-0.73**) and when the two worst categories are removed (**-0.59**), so it isn't driven by a few extreme cases.
+- Part of this is unavoidable. Orders arrive somewhat randomly, so even a perfect forecast of a category's average will miss in individual weeks. That random miss is much larger, as a percentage, for small categories.
+- For example, randomness alone would cause about a **20%** weekly error for office_furniture (16 items a week), compared with about **6%** for health_beauty (208 items a week).
+- How noisy a category was before the test did **not** predict its error (correlation **0.09**). Low volume and changes in demand level made series hard to forecast, not past volatility.
+
+#### Insight 4: Categories whose demand stayed down after the strike were over-forecast the most.
+
+| Category | Level shift after strike | Bias (best model) | MAPE |
+|---|---|---|---|
+| office_furniture | -45% | +48% | 86.1% |
+| cool_stuff | -45% | +23% | 36.2% |
+| garden_tools | -38% | +56% | 72.3% |
+| furniture_decor | -27% | +21% | 41.1% |
+| pet_shop | +18% | -4% | 25.2% |
+| stationery | +25% | 0% | 29.0% |
+
+- The models treated the May 2018 strike as a temporary shock and expected each category to return to its pre-strike level afterwards.
+- For some categories, mostly home and garden goods, demand did not come back. It settled at a permanently lower level, so the forecasts stayed too high for the whole test period.
+- The table shows this directly: categories that fell the most after the strike (left column) were over-forecast the most (middle column). Across all 17 categories, the correlation is **-0.76** (p < **0.001**).
+- Categories that grew after the strike, such as pet_shop and stationery, had almost no bias.
+- The hardest categories to predict were those whose demand level changed, not those with the most week-to-week noise. Planning for these categories should allow wider safety margins, or use monthly rather than weekly forecasts.
+
+#### Insight 5: office_furniture's high MAPE comes from small volumes and a steady over-forecast, not large misses.
+
+- office_furniture had the worst MAPE (**86.1%**), but its forecasts were usually off by only about **9 to 10 items a week**.
+- The misses were consistent rather than driven by a few large outliers. The model over-forecast in **10 of 11 weeks**, because demand settled at about half its pre-strike level.
+- MAPE makes this look worse than it is, because each miss is divided by a small number. In the final test week only **5 items** sold, so that one week alone added about **35 points** to the MAPE.
+- For low-volume categories, RMSE and bias describe forecast quality better than MAPE, and monthly planning would smooth out these small-count swings.
+
+#### Insight 6: The World Cup lowered orders during Brazil's matches, but explains little of the summer dip.
+
+- The 2018 World Cup (14 June to 15 July) overlapped the test period, so it is a possible explanation for the weak June and July demand.
+- People did stop shopping to watch Brazil play. Orders during Brazil's five matches were about **half** their normal level for the same day and hour. A national study by Konduto, an anti-fraud firm, found a similar pattern across Brazilian e-commerce, with sales falling **up to 28%** during the games.
+- However, the matches lasted only a few hours each, so the lost orders add up to only about **6%** of one normal week.
+- The biggest drop (7 to 12 July) came after Brazil was knocked out on 6 July, when the team was no longer playing.
+- The World Cup explains the short dips during matches, but not the larger July drop. The data does not show what caused it, so it is treated as an unexplained shock.
